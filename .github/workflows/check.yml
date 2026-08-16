@@ -1,0 +1,43 @@
+# Checks that the sites listed in .github/scripts/uptime-check.sh are
+# answering, and messages Telegram / WhatsApp when one is not. Nothing else.
+#
+# Secrets (Settings -> Secrets and variables -> Actions). Each channel is
+# independent; a missing secret just disables that channel:
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID                            -> Telegram
+#   META_ACCESS_TOKEN, META_PHONE_ID, META_TO_NUMBER, META_TEMPLATE -> WhatsApp
+name: uptime
+
+on:
+  schedule:
+    # GitHub queues cron best-effort and can run it late under load, so treat
+    # this as "about every 5-15 minutes".
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+# Read the repo. Nothing else — it opens no issues and writes nothing back.
+permissions:
+  contents: read
+
+concurrency:
+  # A slow probe must never overlap the next tick.
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the sites and notify if any is down
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_PHONE_ID: ${{ secrets.META_PHONE_ID }}
+          META_TO_NUMBER: ${{ secrets.META_TO_NUMBER }}
+          META_TEMPLATE: ${{ secrets.META_TEMPLATE }}
+          META_TEMPLATE_LANG: ${{ secrets.META_TEMPLATE_LANG }}
+          SITES: ${{ secrets.SITES }}
+        run: bash .github/scripts/check.sh
