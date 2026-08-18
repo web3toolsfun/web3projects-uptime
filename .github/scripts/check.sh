@@ -63,6 +63,36 @@ for round in $(seq 1 "$ROUNDS"); do
   echo "round $round: ${#failing[@]} not answering"
 done
 
+# ── IS IT THE SITES, OR IS IT US? ───────────────────────────────────────────
+# Everything above proves only that THIS RUNNER could not reach them. Those are
+# different claims, and on 2026-08-18 the difference cost five false alarms:
+# all four sites reported 000 (connection never completed, not an HTTP error),
+# every probe burning its full 10s timeout, while the box sat at load 1.15
+# serving real traffic. The runner's packets were blackholed between Azure and
+# the host. A monitor with one vantage point and no control cannot tell that
+# apart from a real outage — so it reports its own broken network as YOUR
+# outage, which is the one failure mode that destroys trust in every alert
+# that follows.
+#
+# So before speaking, prove the runner still has a network. Two independent
+# controls, and we stay quiet ONLY if BOTH are unreachable — a single
+# third-party outage must never mute a real alert about our own sites.
+#
+# Note what this deliberately does NOT suppress: if the box is genuinely gone,
+# these controls still answer, and the alert goes out exactly as before.
+CONTROLS="${CONTROLS:-https://api.github.com https://www.cloudflare.com}"
+control_ok=0
+for c in $CONTROLS; do
+  cc=$(probe "$c")
+  echo "control $c -> $cc"
+  case "$cc" in 200|30[0-9]) control_ok=1 ;; esac
+done
+
+if [ "$control_ok" -eq 0 ]; then
+  echo "::warning::this runner cannot reach the public internet either (${#failing[@]} site(s) unreachable, every control also failed) — treating as a RUNNER network fault and sending nothing"
+  exit 0
+fi
+
 down=""
 for url in "${failing[@]}"; do
   down="$down${down:+, }$url (${code[$url]})"
