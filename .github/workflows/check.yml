@@ -1,5 +1,19 @@
-# Checks that the sites listed in .github/scripts/uptime-check.sh are
-# answering, and messages Telegram / WhatsApp when one is not. Nothing else.
+# Checks that the sites in the SITES secret are answering, and messages
+# Telegram / WhatsApp when one is not. Nothing else.
+#
+# TWO JOBS, ON PURPOSE. `probe` looks, and never speaks. If it cannot reach a
+# site, `confirm` repeats the whole check on a SECOND runner — a different
+# machine on a different network path — and only that one messages.
+#
+# The reason is a real failure mode, not caution: about 4% of runs cannot reach
+# our host at all (all sites 000, every probe timing out) while the host is up
+# and serving traffic, because that runner's packets are blackholed upstream.
+# One runner cannot tell "the site is down" from "I have no route to it", and
+# control probes do not help — those runs reached api.github.com and
+# cloudflare.com perfectly. Two runners agreeing is what tells them apart.
+#
+# Cost: a real outage is reported about 2 minutes later than before. A false
+# alarm needs two independent runners to be blackholed in the same 5 minutes.
 #
 # Secrets (Settings -> Secrets and variables -> Actions). Each channel is
 # independent; a missing secret just disables that channel:
@@ -24,14 +38,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check:
+  # First vantage. Silent by design: it reports only through its `down` output.
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      down: ${{ steps.probe.outputs.down }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe the sites
+        id: probe
+        env:
+          MODE: probe
+          SITES: ${{ secrets.SITES }}
+        run: bash .github/scripts/check.sh
+
+  # Second vantage, on its own runner. Runs only when the first one saw a
+  # problem, and is the only job that can message anybody.
+  confirm:
+    needs: probe
+    if: needs.probe.outputs.down == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check the sites and notify if any is down
+      - name: Confirm from a second runner, then notify
         env:
+          MODE: alert
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}

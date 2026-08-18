@@ -21,8 +21,17 @@
 # worse than no alert. So a site has to fail three checks spanning about 60
 # seconds before it counts. A real outage lasts far longer than that; a restart
 # never does.
+#
+# TWO MODES, ONE SCRIPT (see .github/workflows/check.yml)
+#   MODE=probe   first runner. Finds the failing sites and says so in the log.
+#                It NEVER messages anybody. It writes `down=1` to the step
+#                output, which is what starts the second job.
+#   MODE=alert   second runner, a different machine on a different network
+#                path. It repeats the whole check and messages only if it
+#                agrees. This is the default when MODE is unset.
 set -uo pipefail
 
+MODE="${MODE:-alert}"
 ROUNDS=3          # consecutive failed rounds before a site counts as down
 GAP=30            # seconds between rounds
 TIMEOUT=10        # per request
@@ -34,7 +43,7 @@ if [ ${#SITE_LIST[@]} -eq 0 ]; then
   echo "::error::the SITES secret is empty — nothing to check"
   exit 1
 fi
-echo "checking ${#SITE_LIST[@]} site(s)"
+echo "mode=$MODE — checking ${#SITE_LIST[@]} site(s)"
 
 probe() {
   local c
@@ -58,6 +67,11 @@ for round in $(seq 1 "$ROUNDS"); do
   [ -n "${failing[0]:-}" ] || failing=()
   if [ ${#failing[@]} -eq 0 ]; then
     echo "all sites answering (confirmed round $round)"
+    # Reaching here in alert mode means the first runner could not reach what
+    # this one reaches: the first runner's network was at fault, not the sites.
+    if [ "$MODE" = "alert" ]; then
+      echo "::notice::second vantage reached every site that the first runner could not — a RUNNER network fault, nothing sent"
+    fi
     exit 0
   fi
   echo "round $round: ${#failing[@]} not answering"
@@ -65,21 +79,25 @@ done
 
 # ── IS IT THE SITES, OR IS IT US? ───────────────────────────────────────────
 # Everything above proves only that THIS RUNNER could not reach them. Those are
-# different claims, and on 2026-08-18 the difference cost five false alarms:
-# all four sites reported 000 (connection never completed, not an HTTP error),
-# every probe burning its full 10s timeout, while the box sat at load 1.15
-# serving real traffic. The runner's packets were blackholed between Azure and
-# the host. A monitor with one vantage point and no control cannot tell that
-# apart from a real outage — so it reports its own broken network as YOUR
-# outage, which is the one failure mode that destroys trust in every alert
-# that follows.
+# different claims, and the difference has now cost eight false alarms: all
+# four sites reported 000 (connection never completed, not an HTTP error),
+# every probe burning its full 10s timeout, while the box sat at load ~1
+# serving real traffic. The runner's packets were blackholed somewhere between
+# Azure and the host — about 4% of runs, a fresh runner IP every time.
 #
-# So before speaking, prove the runner still has a network. Two independent
-# controls, and we stay quiet ONLY if BOTH are unreachable — a single
-# third-party outage must never mute a real alert about our own sites.
+# Control probes alone DO NOT catch this. They were added on 2026-08-18 and
+# three more false alarms followed the same day (runs #127, #142, #150): the
+# runner reached api.github.com and cloudflare.com with a 200 each time and
+# still could not reach one single host — ours. A control proves the runner has
+# *a* network. It cannot prove the runner has a route to US.
 #
-# Note what this deliberately does NOT suppress: if the box is genuinely gone,
-# these controls still answer, and the alert goes out exactly as before.
+# Only a SECOND VANTAGE can tell those apart, so the alert now needs two
+# independent runners to agree (MODE=probe hands over to MODE=alert). The
+# controls stay because they are nearly free and they catch the cheaper case
+# early.
+#
+# Note what none of this suppresses: if the box is genuinely gone, both runners
+# see it gone, and the alert goes out as before — about 2 minutes later.
 CONTROLS="${CONTROLS:-https://api.github.com https://www.cloudflare.com}"
 control_ok=0
 for c in $CONTROLS; do
@@ -97,7 +115,17 @@ down=""
 for url in "${failing[@]}"; do
   down="$down${down:+, }$url (${code[$url]})"
 done
-text="DOWN: $down — $(date -u +%H:%M) UTC"
+
+# First vantage: hand over to a second runner instead of messaging. The site
+# names stay in this log and go no further — the job output is a single digit.
+if [ "$MODE" = "probe" ]; then
+  echo "first vantage cannot reach: $down"
+  echo "handing over to a second runner on a different network path"
+  [ -n "${GITHUB_OUTPUT:-}" ] && echo "down=1" >> "$GITHUB_OUTPUT"
+  exit 0
+fi
+
+text="DOWN: $down — $(date -u +%H:%M) UTC (confirmed from two runners)"
 echo "$text"
 
 sent=""
